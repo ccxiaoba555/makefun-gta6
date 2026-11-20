@@ -23,7 +23,7 @@ export function applyShot(game, shot, seed) {
     game.startPlayScene({
       inCar: true,
       wanted: chase ? 3 : 0,
-      missionIndex: chase ? 2 : 0,
+      missionIndex: chase ? 7 : 0,
       missionStage: chase ? 'escape' : 'pickup',
     });
     return;

@@ -65,6 +65,11 @@ export function buildCity(seed) {
   const trees = [];
   const plazas = [];
 
+  // The safehouse sits off-road in its block, so keep that patch clear of
+  // buildings — otherwise the player gets shoved out of the walls and can
+  // never stand on the mission target.
+  const clearX0 = 2700, clearY0 = 1900, clearX1 = 2860, clearY1 = 2060;
+
   // Every cell between four roads gets a use: mostly buildings, sometimes a
   // park or a paved plaza. The beach strip stays open.
   for (let i = 0; i < vertical.length - 1; i++) {
@@ -97,6 +102,7 @@ export function buildCity(seed) {
         const bh = rngRange(rng, 70, Math.min(150, y1 - y0 - 8));
         const bx = x0 + (l * (x1 - x0)) / lots + 4;
         const by = y0 + rngRange(rng, 4, Math.max(5, y1 - y0 - bh - 4));
+        if (bx < clearX1 && bx + bw > clearX0 && by < clearY1 && by + bh > clearY0) continue;
         buildings.push({
           x: bx,
           y: by,
@@ -135,10 +141,12 @@ export function buildCity(seed) {
   const taxiStand = { x: 600, y: 200, label: 'CORAL AVE FARE' };
   const depot = { x: 2600, y: 600, label: 'PARCEL DEPOT' };
   const marina = { x: 300, y: 2200, label: 'MARINA' };
+  // Rico's garage: park on the road beside it and press G to tune the car.
+  const garage = { x: 1400, y: 1180, label: 'GARAGE' };
 
   return {
     buildings, parks, trees, plazas, parkedCars,
-    safehouse, taxiStand, depot, marina,
+    safehouse, taxiStand, depot, marina, garage,
     vertical, horizontal,
   };
 }

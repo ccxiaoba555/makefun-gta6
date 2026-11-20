@@ -1,5 +1,5 @@
 // Vice Bay — the game loop and all the rules.
-// Owns the player, traffic, pedestrians, police, bullets and the three jobs,
+// Owns the player, traffic, pedestrians, police, bullets and the eight jobs,
 // and hands each frame to render.js to draw. The city itself lives in
 // world.js; the look lives in render.js; this file is only the rules.
 
@@ -8,7 +8,8 @@ import {
   CAR_ACCEL, CAR_MAX_SPEED, CAR_REVERSE_SPEED, CAR_TURN, CAR_BRAKE, CAR_DRAG,
   MAX_WANTED, WANTED_DECAY_SECONDS, BULLET_SPEED, BULLET_RANGE,
   SHOOT_COOLDOWN, PUNCH_COOLDOWN, PUNCH_REACH, PARCEL_TIME_LIMIT,
-  MISSIONS, CAR_COLORS, SAVE_KEY,
+  MISSIONS, DISTRICTS, RADIO_STATIONS, WEAPONS, GARAGE_UPGRADES,
+  RESPECT_RANKS, CAR_COLORS, SAVE_KEY,
 } from './config.js';
 import { hashSeed, makeRng, rngInt, rngRange, rngPick, rngChance } from './random.js';
 import { Input } from './input.js';
@@ -36,6 +37,24 @@ function turnToward(angle, target, maxStep) {
   while (d > Math.PI) d -= Math.PI * 2;
   while (d < -Math.PI) d += Math.PI * 2;
   return angle + Math.max(-maxStep, Math.min(maxStep, d));
+}
+
+// Snap a point to the nearest road centreline, for roadblocks and spikes.
+// The result is clamped inside the world so a block can never land off-map.
+function snapToRoad(x, y, city) {
+  x = Math.max(160, Math.min(WORLD_W - 160, x));
+  y = Math.max(160, Math.min(WORLD_H - 160, y));
+  let best = null;
+  let bestD = Infinity;
+  for (const rx of city.vertical) {
+    const d = Math.abs(x - rx);
+    if (d < bestD) { bestD = d; best = { x: rx, y, vertical: true }; }
+  }
+  for (const ry of city.horizontal) {
+    const d = Math.abs(y - ry);
+    if (d < bestD) { bestD = d; best = { x, y: ry, vertical: false }; }
+  }
+  return best;
 }
 
 export class Game {
@@ -97,16 +116,46 @@ export class Game {
     this.hitCooldown = 0;
     this.shootCooldown = 0;
     this.punchCooldown = 0;
+    this.roadblockHitCooldown = 0;
     this.message = '';
     this.messageTimer = 0;
     this.muted = false;
     this.stats = { missionsDone: 0, earned: 0 };
     this.missionIndex = 0;
+    // Crew and reputation: respect grows with jobs and turf work, and the
+    // rank it buys slows the police response and opens garage tiers.
+    this.respect = 0;
+    this.standing = {};
+    for (const d of DISTRICTS) this.standing[d.name] = 0;
+    this.standing.Midtown = 0;
+    // Garage mods: engine / armor / paint, 0–3 tiers each.
+    this.mods = { engine: 0, armor: 0, paint: 0 };
+    // Weapon slots: 0 pistol, 1 shotgun. Radio: station index.
+    this.weapon = 0;
+    this.radio = 0;
+    this.radioOn = false;
+    // Police escalation: roadblocks, Air One helicopter, spike strips.
+    this.roadblocks = [];
+    this.spikes = [];
+    this.heli = null;
+    this.tireTimer = 0;
     this.camera = { x: 900, y: 500 };
     for (const car of this.city.parkedCars) car.taken = false;
     for (let i = 0; i < 14; i++) this.traffic.push(this.makeTrafficCar());
     for (let i = 0; i < 18; i++) this.peds.push(this.makePed());
-    this.setupMission(0, 'pickup');
+    this.setupMission(0);
+  }
+
+  respectRank() {
+    let rank = RESPECT_RANKS[0];
+    for (const r of RESPECT_RANKS) if (this.respect >= r.min) rank = r;
+    return rank.name;
+  }
+
+  effMaxSpeed() {
+    let top = CAR_MAX_SPEED * (1 + 0.12 * this.mods.engine);
+    if (this.tireTimer > 0) top *= 0.55;
+    return top;
   }
 
   makeTrafficCar() {
@@ -150,65 +199,148 @@ export class Game {
     this.crimeTimer = 0;
   }
 
+  // Resolve a stage's target point: a city landmark, a district, or a
+  // fixed coordinate.
+  stageTarget(stage) {
+    if (stage.at) {
+      const spot = this.city[stage.at];
+      return { x: spot.x, y: spot.y, label: stage.label };
+    }
+    if (stage.district) {
+      const d = DISTRICTS.find((x) => x.name === stage.district);
+      if (d) return { x: d.x, y: d.y, label: stage.label };
+    }
+    return { x: stage.x, y: stage.y, label: stage.label };
+  }
+
   setupMission(index, stage) {
     this.missionIndex = index;
     const def = MISSIONS[index];
     if (!def) { this.mission = null; return; }
-    const city = this.city;
-    if (def.id === 'taxi') {
-      this.mission = {
-        id: def.id, name: def.name, briefing: def.briefing, reward: def.reward,
-        stage, timer: null,
-        target: stage === 'pickup'
-          ? { x: city.taxiStand.x, y: city.taxiStand.y, label: 'PICK UP FARE' }
-          : { x: city.marina.x, y: city.marina.y, label: 'DROP OFF' },
-      };
-    } else if (def.id === 'parcel') {
-      this.mission = {
-        id: def.id, name: def.name, briefing: def.briefing, reward: def.reward,
-        stage, timer: stage === 'deliver' ? PARCEL_TIME_LIMIT : null,
-        target: stage === 'pickup'
-          ? { x: city.depot.x, y: city.depot.y, label: 'COLLECT PARCEL' }
-          : { x: city.marina.x, y: city.marina.y, label: 'DELIVER PARCEL' },
-      };
-    } else {
-      this.mission = {
-        id: def.id, name: def.name, briefing: def.briefing, reward: def.reward,
-        stage: 'escape', timer: null,
-        target: { x: city.safehouse.x, y: city.safehouse.y, label: 'SAFEHOUSE' },
-      };
+    const startStage = stage === 'dropoff' ? 1 : 0;
+    const stages = def.stages.map((s) => ({
+      ...s,
+      target: this.stageTarget(s),
+      timer: s.timer != null ? s.timer : null,
+    }));
+    this.mission = {
+      id: def.id, name: def.name, briefing: def.briefing,
+      reward: def.reward, respect: def.respect || 10,
+      stages, stageIdx: startStage,
+      timer: def.timeLimit != null ? def.timeLimit : null,
+      timeLimit: def.timeLimit != null ? def.timeLimit : null,
+    };
+    this.enterStage();
+  }
+
+  // Effects that fire when a stage starts (heat, crew chatter).
+  enterStage() {
+    const m = this.mission;
+    if (!m) return;
+    const stage = m.stages[m.stageIdx];
+    if (!stage) return;
+    if (stage.wantedOnEnter) {
+      this.addWanted(stage.wantedOnEnter);
+      this.showMessage('Heat rising — ' + this.wanted + ' stars on you now.', 2.5);
     }
+  }
+
+  currentTarget() {
+    const m = this.mission;
+    if (!m) return null;
+    const stage = m.stages[m.stageIdx];
+    return stage ? stage.target : null;
+  }
+
+  advanceStage() {
+    const m = this.mission;
+    const stage = m.stages[m.stageIdx];
+    // Turf work pays respect per corner, straight away.
+    if (m.id === 'turf') {
+      this.respect += 5;
+      const key = stage.district || (m.stageIdx === 1 ? 'Midtown' : m.stageIdx === 2 ? 'Gull Lane' : 'Coral Row');
+      this.standing[key] = (this.standing[key] || 0) + 1;
+      this.showMessage('Corner claimed — ' + key + ' standing up. Respect +' + 5, 2.5);
+    } else if (m.stageIdx === 0 && m.stages.length > 1) {
+      this.sound.pickup();
+    }
+    m.stageIdx += 1;
+    if (m.stageIdx >= m.stages.length) {
+      this.completeMission();
+      return;
+    }
+    this.enterStage();
   }
 
   setupRepeatFare() {
     const spot = this.city[rngPick(this.rng, LANDMARKS)];
     this.mission = {
       id: 'fare', name: 'Taxi Fare', briefing: 'A fare is waiting — get them across town.',
-      reward: rngInt(this.rng, 90, 150), stage: 'fare', timer: null,
+      reward: rngInt(this.rng, 90, 150), respect: 5, stages: [],
+      stageIdx: 0, timer: null, timeLimit: null,
       target: { x: spot.x, y: spot.y, label: 'FARE HERE' },
     };
   }
 
   completeMission() {
     const m = this.mission;
-    this.player.money += m.reward;
-    this.stats.earned += m.reward;
+    // The crew pays a 10% bonus once you hold Hustler rank or better.
+    const bonus = this.respect >= 30 ? Math.round(m.reward * 0.1) : 0;
+    const paid = m.reward + bonus;
+    this.player.money += paid;
+    this.stats.earned += paid;
     this.stats.missionsDone += 1;
+    this.respect += m.respect || 10;
     this.sound.cash();
-    this.showMessage('Job done! +$' + m.reward, 3);
+    this.showMessage('Job done! +$' + paid + (bonus ? ' (crew bonus +$' + bonus + ')' : '') + '  Respect +' + (m.respect || 10), 3.5);
     this.saveBest();
-    if (m.id === 'taxi') this.setupMission(1, 'pickup');
-    else if (m.id === 'parcel') { this.setupMission(2, 'escape'); this.addWanted(3); }
-    else if (m.id === 'escape') {
-      this.wanted = 0;
-      this.cops = [];
-      this.mission = null;
-      this.fareTimer = 6;
-      this.showMessage('Clean getaway — Vice Bay is yours. More fares coming.', 4);
-    } else {
+    if (m.id === 'fare') {
       this.mission = null;
       this.fareTimer = 5;
+      return;
     }
+    const next = this.missionIndex + 1;
+    if (next < MISSIONS.length) {
+      this.setupMission(next);
+    } else {
+      this.wanted = 0;
+      this.cops = [];
+      this.roadblocks = [];
+      this.spikes = [];
+      this.heli = null;
+      this.mission = null;
+      this.fareTimer = 6;
+      this.showMessage('All 8 jobs done — Vice Bay is yours. More fares coming.', 4);
+    }
+  }
+
+  failMission(reason) {
+    this.showMessage(reason + ' — the job goes back on the board. Try again.', 3.5);
+    this.setupMission(this.missionIndex);
+  }
+
+  // ---- garage ----
+
+  buyUpgrade(kind) {
+    const def = GARAGE_UPGRADES[kind];
+    const level = this.mods[kind];
+    if (level >= 3) {
+      this.showMessage(def.name + ' is already maxed out.', 2);
+      return;
+    }
+    const price = def.prices[level];
+    if (this.player.money < price) {
+      this.showMessage('Not enough cash — ' + def.name + ' tier ' + (level + 1) + ' costs $' + price + '.', 2.5);
+      return;
+    }
+    this.player.money -= price;
+    this.mods[kind] += 1;
+    if (kind === 'paint' && this.player.car) {
+      const idx = CAR_COLORS.indexOf(this.player.car.color);
+      this.player.car.color = CAR_COLORS[(idx + 1) % CAR_COLORS.length];
+    }
+    this.sound.cash();
+    this.showMessage(def.name + ' tier ' + this.mods[kind] + ' fitted — $' + price + '. ' + def.desc, 2.5);
   }
 
   // ---- scene entry points (also used by shots.js) ----
@@ -302,6 +434,8 @@ export class Game {
     if (this.hitCooldown > 0) this.hitCooldown -= dt;
     if (this.shootCooldown > 0) this.shootCooldown -= dt;
     if (this.punchCooldown > 0) this.punchCooldown -= dt;
+    if (this.roadblockHitCooldown > 0) this.roadblockHitCooldown -= dt;
+    if (this.tireTimer > 0) this.tireTimer -= dt;
     if (this.input.wasPressed('KeyM')) {
       this.muted = !this.muted;
       this.sound.setMuted(this.muted);
@@ -313,6 +447,15 @@ export class Game {
       if (this.input.wasPressed('Enter') || this.input.wasPressed('Space')) this.startPlayScene({});
       return;
     }
+    if (this.mode === 'garage') {
+      if (this.input.wasPressed('Digit1')) this.buyUpgrade('engine');
+      else if (this.input.wasPressed('Digit2')) this.buyUpgrade('armor');
+      else if (this.input.wasPressed('Digit3')) this.buyUpgrade('paint');
+      if (this.input.wasPressed('Escape') || this.input.wasPressed('KeyG') || this.input.wasPressed('KeyP')) {
+        this.mode = 'play';
+      }
+      return;
+    }
     if (this.mode === 'pause') {
       if (this.input.wasPressed('KeyP') || this.input.wasPressed('Escape')) this.mode = 'play';
       return;
@@ -322,17 +465,38 @@ export class Game {
       this.mode = 'pause';
       return;
     }
+    // Radio: start the loop once audio is unlocked, swap on R.
+    if (this.sound.ctx && !this.radioOn) {
+      this.sound.startRadio(this.radio);
+      this.radioOn = true;
+    }
+    if (this.input.wasPressed('KeyR')) {
+      this.radio = (this.radio + 1) % RADIO_STATIONS.length;
+      this.sound.setRadioStation(this.radio);
+      const st = RADIO_STATIONS[this.radio];
+      this.showMessage('Radio: ' + st.name + ' — ' + st.style, 2);
+    }
+    // Garage: park beside Rico's shop and press G.
+    if (this.input.wasPressed('KeyG') && !this.player.onFoot && this.player.car &&
+        dist(this.player, this.city.garage) < 110) {
+      this.mode = 'garage';
+      this.sound.click();
+      return;
+    }
     this.updatePlayer(dt);
     this.updateTraffic(dt);
     this.updatePeds(dt);
     this.updateCops(dt);
+    this.updateEscalation(dt);
     this.updateBullets(dt);
     this.updateParticles(dt);
     this.updateMissions(dt);
-    // Wanted heat cools off when the player keeps their nose clean.
-    if (this.wanted > 0) {
+    // Wanted heat cools off when the player keeps their nose clean — unless
+    // Air One is overhead, in which case the chopper keeps eyes on you.
+    if (this.wanted > 0 && !this.heli) {
       this.crimeTimer += dt;
-      if (this.crimeTimer > WANTED_DECAY_SECONDS) {
+      const decay = this.respect >= 70 ? 20 : WANTED_DECAY_SECONDS;
+      if (this.crimeTimer > decay) {
         this.wanted -= 1;
         this.crimeTimer = 0;
         this.showMessage('Heat dying down… ' + this.wanted + ' star' + (this.wanted === 1 ? '' : 's'), 2);
@@ -345,7 +509,7 @@ export class Game {
     this.camera.y = Math.max(0, Math.min(WORLD_H - VIEW_H, py));
     // Engine and siren follow the action.
     const driving = !this.player.onFoot && this.player.car;
-    this.sound.engine(driving ? Math.abs(this.player.speed || 0) / CAR_MAX_SPEED : 0, !!driving);
+    this.sound.engine(driving ? Math.abs(this.player.speed || 0) / this.effMaxSpeed() : 0, !!driving);
     this.sound.siren(this.cops.length > 0);
     if (this.player.hp <= 0) this.showGameOver('wasted');
   }
@@ -361,6 +525,12 @@ export class Game {
     const input = this.input;
     const fwd = (input.isDown('KeyW', 'ArrowUp') ? 1 : 0) - (input.isDown('KeyS', 'ArrowDown') ? 1 : 0);
     const strafe = (input.isDown('KeyD', 'ArrowRight') ? 1 : 0) - (input.isDown('KeyA', 'ArrowLeft') ? 1 : 0);
+
+    // Q swaps weapon slots, on foot or behind the wheel.
+    if (input.wasPressed('KeyQ')) {
+      this.weapon = (this.weapon + 1) % WEAPONS.length;
+      this.showMessage('Weapon: ' + WEAPONS[this.weapon].name, 1.5);
+    }
 
     if (p.onFoot) {
       let mx = strafe;
@@ -388,7 +558,8 @@ export class Game {
     const car = p.car;
     if (!car) { p.onFoot = true; return; }
     const speed = p.speed || 0;
-    if (fwd > 0) p.speed = Math.min(CAR_MAX_SPEED, speed + CAR_ACCEL * dt);
+    const top = this.effMaxSpeed();
+    if (fwd > 0) p.speed = Math.min(top, speed + CAR_ACCEL * dt);
     else if (fwd < 0) {
       p.speed = speed > 20 ? Math.max(0, speed - CAR_BRAKE * dt) : Math.max(-CAR_REVERSE_SPEED, speed - CAR_ACCEL * 0.6 * dt);
     } else {
@@ -410,6 +581,25 @@ export class Game {
     const clamped = clampToWorld(p.x, p.y, 30);
     p.x = clamped.x; p.y = clamped.y;
     car.x = p.x; car.y = p.y;
+    // Roadblocks stop a car cold; spike strips shred the tires.
+    for (const rb of this.roadblocks) {
+      if (dist(p, rb) < 38 && this.roadblockHitCooldown <= 0) {
+        this.roadblockHitCooldown = 1.2;
+        p.speed *= 0.2;
+        this.sound.crash();
+        this.burst(p.x, p.y, '#ffb14a', 12);
+        this.showMessage('Roadblock! BBPD has the street sealed.', 2);
+      }
+    }
+    for (const sp of this.spikes) {
+      if (dist(p, sp) < 32 && this.tireTimer <= 0) {
+        this.tireTimer = 6;
+        p.speed *= 0.2;
+        this.sound.crash();
+        this.burst(p.x, p.y, '#d8d8d8', 10);
+        this.showMessage('Spike strip! Tires shredded — 6s of limp speed.', 2.5);
+      }
+    }
     // Running someone over is a crime the whole street sees.
     for (const ped of this.peds) {
       if (ped.alive && dist(p, ped) < 26) {
@@ -490,16 +680,21 @@ export class Game {
 
   shoot() {
     if (this.shootCooldown > 0) return;
-    this.shootCooldown = SHOOT_COOLDOWN;
+    const w = WEAPONS[this.weapon];
+    this.shootCooldown = w.cooldown;
     const p = this.player;
     const gx = p.x + Math.cos(p.angle) * 22;
     const gy = p.y + Math.sin(p.angle) * 22;
-    this.bullets.push({
-      x: gx, y: gy,
-      vx: Math.cos(p.angle) * BULLET_SPEED,
-      vy: Math.sin(p.angle) * BULLET_SPEED,
-      life: BULLET_RANGE / BULLET_SPEED, fromCop: false,
-    });
+    for (let i = 0; i < w.pellets; i++) {
+      const off = w.pellets === 1 ? 0 : (i - (w.pellets - 1) / 2) * (w.spread / (w.pellets - 1));
+      const a = p.angle + off;
+      this.bullets.push({
+        x: gx, y: gy,
+        vx: Math.cos(a) * BULLET_SPEED,
+        vy: Math.sin(a) * BULLET_SPEED,
+        life: w.range / BULLET_SPEED, fromCop: false, damage: w.damage,
+      });
+    }
     this.sound.shot();
     this.addWanted(1);
   }
@@ -551,7 +746,10 @@ export class Game {
   }
 
   updateCops(dt) {
-    const want = this.wanted > 0 ? Math.min(1 + this.wanted, 5) : 0;
+    // Respect talks: at Runner rank the crew's tip-offs keep one patrol
+    // car off your tail.
+    let want = this.wanted > 0 ? Math.min(1 + this.wanted, 5) : 0;
+    if (this.respect >= 70) want = Math.max(0, want - 1);
     while (this.cops.length < want) {
       const spot = randomRoadPoint(this.rng, this.city);
       let cx = spot.x;
@@ -603,10 +801,10 @@ export class Game {
       cop.y += Math.sin(cop.angle) * cop.speed * dt;
       const fixed = resolveBuildingCollision(cop.x, cop.y, 22, this.city.buildings);
       cop.x = fixed.x; cop.y = fixed.y;
-      // Ram the player.
+      // Ram the player. Garage armor takes the edge off.
       if (d < 36 && this.hitCooldown <= 0) {
         this.hitCooldown = 0.7;
-        this.player.hp -= 7;
+        this.player.hp -= Math.max(2, 7 - 2 * this.mods.armor);
         this.sound.crash();
         this.burst(this.player.x, this.player.y, '#ff5a5a', 10);
         if (!this.player.onFoot && this.player.car) this.player.speed *= 0.5;
@@ -627,11 +825,59 @@ export class Game {
           this.bullets.push({
             x: cop.x + Math.cos(a) * 24, y: cop.y + Math.sin(a) * 24,
             vx: Math.cos(a) * BULLET_SPEED * 0.8, vy: Math.sin(a) * BULLET_SPEED * 0.8,
-            life: 0.9, fromCop: true,
+            life: 0.9, fromCop: true, damage: 5,
           });
           this.sound.shot();
         }
       }
+    }
+  }
+
+  // Police escalation: roadblocks at 3 stars, Air One and spike strips
+  // at 4 stars. Everything is placed on the road ahead of the player and
+  // re-laid once the player blows past it.
+  updateEscalation(dt) {
+    const p = this.player;
+    if (this.wanted >= 3) {
+      while (this.roadblocks.length < 2) {
+        const ahead = snapToRoad(
+          p.x + Math.cos(p.angle) * 560, p.y + Math.sin(p.angle) * 560, this.city);
+        this.roadblocks.push({ x: ahead.x, y: ahead.y, vertical: ahead.vertical });
+      }
+      for (let i = 0; i < this.roadblocks.length; i++) {
+        const rb = this.roadblocks[i];
+        if (dist(p, rb) > 850) {
+          const ahead = snapToRoad(
+            p.x + Math.cos(p.angle) * 560, p.y + Math.sin(p.angle) * 560, this.city);
+          this.roadblocks[i] = { x: ahead.x, y: ahead.y, vertical: ahead.vertical };
+        }
+      }
+    } else {
+      this.roadblocks = [];
+    }
+    if (this.wanted >= 4) {
+      if (!this.heli) this.heli = { x: p.x - 120, y: p.y - 160 };
+      // The chopper shadows the player from above, spotlight sweeping.
+      const hx = this.heli.x + (p.x - 60 - this.heli.x) * Math.min(1, dt * 1.6);
+      const hy = this.heli.y + (p.y - 80 - this.heli.y) * Math.min(1, dt * 1.6);
+      this.heli.x = hx;
+      this.heli.y = hy;
+      while (this.spikes.length < 1) {
+        const ahead = snapToRoad(
+          p.x + Math.cos(p.angle) * 420, p.y + Math.sin(p.angle) * 420, this.city);
+        this.spikes.push({ x: ahead.x, y: ahead.y, vertical: ahead.vertical });
+      }
+      for (let i = 0; i < this.spikes.length; i++) {
+        const sp = this.spikes[i];
+        if (dist(p, sp) > 800) {
+          const ahead = snapToRoad(
+            p.x + Math.cos(p.angle) * 420, p.y + Math.sin(p.angle) * 420, this.city);
+          this.spikes[i] = { x: ahead.x, y: ahead.y, vertical: ahead.vertical };
+        }
+      }
+    } else {
+      this.heli = null;
+      this.spikes = [];
     }
   }
 
@@ -643,7 +889,7 @@ export class Game {
       if (b.life <= 0) continue;
       if (b.fromCop) {
         if (dist(b, this.player) < 16) {
-          this.player.hp -= 5;
+          this.player.hp -= b.damage || 5;
           b.life = 0;
           this.burst(b.x, b.y, '#ff5a5a', 6);
         }
@@ -661,7 +907,7 @@ export class Game {
       if (b.life <= 0) continue;
       for (const cop of this.cops) {
         if (dist(b, cop) < 24) {
-          cop.hp -= 34;
+          cop.hp -= b.damage || 34;
           b.life = 0;
           this.burst(b.x, b.y, '#ffb14a', 8);
           if (cop.hp <= 0) {
@@ -707,26 +953,41 @@ export class Game {
     }
     const m = this.mission;
     if (!m) return;
+    // Repeat fares have a single flat target, not stages.
+    if (m.id === 'fare') {
+      if (dist(this.player, m.target) < 70) this.completeMission();
+      return;
+    }
+    // Whole-job clock (races, rescues, getaways).
     if (m.timer != null) {
       m.timer -= dt;
       if (m.timer <= 0) {
-        this.showMessage('Too slow — the parcel job went to someone else.', 3);
-        this.setupMission(1, 'pickup');
+        this.failMission('Out of time');
         return;
       }
     }
-    if (dist(this.player, m.target) < 70) {
-      if (m.id === 'taxi' && m.stage === 'pickup') {
-        this.setupMission(0, 'dropoff');
-        this.sound.pickup();
-        this.showMessage('Fare aboard — take them to the Marina.', 2.5);
-      } else if (m.id === 'parcel' && m.stage === 'pickup') {
-        this.setupMission(1, 'deliver');
-        this.sound.pickup();
-        this.showMessage('Parcel collected — 75 seconds, go!', 2.5);
-      } else {
-        this.completeMission();
+    const stage = m.stages[m.stageIdx];
+    if (!stage) return;
+    if (stage.timer != null) {
+      stage.timer -= dt;
+      if (stage.timer <= 0) {
+        this.failMission('Too slow — the parcel job went to someone else');
+        return;
       }
+    }
+    if (dist(this.player, stage.target) < 70) {
+      if (m.id === 'taxi' && m.stageIdx === 0) {
+        this.showMessage('Fare aboard — take them to the Marina.', 2.5);
+      } else if (m.id === 'parcel' && m.stageIdx === 0) {
+        this.showMessage('Parcel collected — 75 seconds, go!', 2.5);
+      } else if (m.id === 'escort' && m.stageIdx === 0) {
+        this.showMessage('Crates loaded. The harbour patrol is watching — stay smooth.', 2.5);
+      } else if (m.id === 'rescue' && m.stageIdx === 0) {
+        this.showMessage('Rico is with you! Get him to the safehouse, now!', 2.5);
+      } else if (m.id === 'race') {
+        this.showMessage(m.stageIdx < 2 ? 'Checkpoint! Next one — keep it pinned.' : 'Finish line!', 2);
+      }
+      this.advanceStage();
     }
   }
 }

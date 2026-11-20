@@ -5,7 +5,8 @@
 export const GAME_KEYS = [
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-  'KeyJ', 'KeyK', 'KeyE', 'KeyM', 'KeyP',
+  'KeyJ', 'KeyK', 'KeyE', 'KeyM', 'KeyP', 'KeyQ', 'KeyR', 'KeyG',
+  'Digit1', 'Digit2', 'Digit3',
   'Space', 'Enter', 'Escape',
 ];
 

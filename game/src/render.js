@@ -2,8 +2,20 @@
 // One canvas, drawn in layers: ground and roads, buildings and parks,
 // the mission marker, every car and pedestrian, then the HUD and the menus.
 
-import { WORLD_W, WORLD_H, VIEW_W, VIEW_H, ROAD_W, OCEAN_EDGE, SAND_EDGE, PALETTE } from './config.js';
+import { WORLD_W, WORLD_H, VIEW_W, VIEW_H, ROAD_W, OCEAN_EDGE, SAND_EDGE, PALETTE, RADIO_STATIONS, WEAPONS, GARAGE_UPGRADES } from './config.js';
 import { isWater } from './world.js';
+
+// The objective the marker and minimap should point at: staged jobs use
+// the current stage target, repeat fares carry a flat target.
+function missionTarget(state) {
+  const m = state.mission;
+  if (!m) return null;
+  if (m.stages && m.stages.length) {
+    const stage = m.stages[m.stageIdx];
+    return stage ? stage.target : null;
+  }
+  return m.target || null;
+}
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -13,6 +25,23 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+function wrapText(ctx, text, maxWidth) {
+  const words = text.split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    const test = line ? line + ' ' + w : w;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      lines.push(line);
+      line = w;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 function drawCarShape(ctx, car, time) {
@@ -171,6 +200,7 @@ function drawWorld(ctx, city, cam, time) {
     [city.taxiStand, 'CORAL AVE'],
     [city.depot, 'DEPOT'],
     [city.marina, 'MARINA'],
+    [city.garage, 'GARAGE'],
   ];
   for (const [spot, text] of labels) {
     ctx.fillStyle = 'rgba(10,14,24,0.6)';
@@ -179,6 +209,13 @@ function drawWorld(ctx, city, cam, time) {
     ctx.fillStyle = '#f5f2e8';
     ctx.fillText(text, spot.x, spot.y - 21);
   }
+  // Rico's garage: an orange workshop block with a big G.
+  ctx.fillStyle = '#c96a1a';
+  ctx.fillRect(city.garage.x - 30, city.garage.y - 20, 60, 40);
+  ctx.fillStyle = '#f5f2e8';
+  ctx.font = 'bold 26px sans-serif';
+  ctx.fillText('G', city.garage.x, city.garage.y + 9);
+  ctx.font = 'bold 13px sans-serif';
   // Safehouse roof marker.
   ctx.fillStyle = '#2f7a33';
   ctx.fillRect(city.safehouse.x - 26, city.safehouse.y - 18, 52, 36);
@@ -267,11 +304,12 @@ function drawMinimap(ctx, state, city) {
   for (const ry of city.horizontal) ctx.fillRect(mx, my + ry * sy - 2, mw, 4);
   ctx.fillStyle = 'rgba(255,255,255,0.5)';
   for (const b of city.buildings) ctx.fillRect(mx + b.x * sx, my + b.y * sy, Math.max(2, b.w * sx), Math.max(2, b.h * sy));
-  if (state.mission && state.mission.target) {
+  const mTarget = missionTarget(state);
+  if (mTarget) {
     const blink = Math.floor(state.time * 3) % 2 === 0;
     ctx.fillStyle = blink ? PALETTE.gold : '#ff8c1a';
     ctx.beginPath();
-    ctx.arc(mx + state.mission.target.x * sx, my + state.mission.target.y * sy, 6, 0, Math.PI * 2);
+    ctx.arc(mx + mTarget.x * sx, my + mTarget.y * sy, 6, 0, Math.PI * 2);
     ctx.fill();
   }
   for (const cop of state.cops) {
@@ -309,9 +347,9 @@ function drawMinimap(ctx, state, city) {
 }
 
 function drawHud(ctx, state, city) {
-  // Top-left money and health.
+  // Top-left money, respect rank and health.
   ctx.fillStyle = PALETTE.hudBg;
-  roundRect(ctx, 14, 14, 250, 64, 10);
+  roundRect(ctx, 14, 14, 250, 92, 10);
   ctx.fill();
   ctx.textAlign = 'left';
   ctx.fillStyle = PALETTE.gold;
@@ -320,6 +358,10 @@ function drawHud(ctx, state, city) {
   ctx.fillStyle = '#f5f2e8';
   ctx.font = '12px sans-serif';
   ctx.fillText('BEST $' + Math.floor(state.best.money).toLocaleString('en-US'), 28, 64);
+  ctx.fillStyle = '#ffd94a';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.fillText('RESPECT ' + state.respect + ' • ' + (state.respectRank ? state.respectRank() : ''), 28, 84);
+  ctx.fillText('ENG ' + state.mods.engine + '  ARM ' + state.mods.armor + '  PAINT ' + state.mods.paint, 28, 100);
   // Health bar.
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.fillRect(150, 30, 100, 12);
@@ -344,30 +386,43 @@ function drawHud(ctx, state, city) {
   // Mission panel.
   if (state.mission) {
     const m = state.mission;
+    const stage = m.stages && m.stages.length ? m.stages[m.stageIdx] : null;
+    const clock = m.timer != null ? m.timer : (stage && stage.timer != null ? stage.timer : null);
+    const stageText = stage ? '  •  STAGE ' + (m.stageIdx + 1) + '/' + m.stages.length : '';
+    ctx.fillStyle = '#f5f2e8';
+    ctx.font = '12px sans-serif';
+    const briefLines = wrapText(ctx, m.briefing, 306).slice(0, 2);
+    const panelH = 44 + briefLines.length * 18 + (clock != null ? 22 : 0) + 18;
     ctx.fillStyle = PALETTE.hudBg;
-    roundRect(ctx, 14, 88, 330, m.timer != null ? 76 : 58, 10);
+    roundRect(ctx, 14, 116, 330, panelH, 10);
     ctx.fill();
     ctx.fillStyle = PALETTE.gold;
     ctx.font = 'bold 14px sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText((state.missionIndex + 1) + '/3  ' + m.name, 26, 110);
+    ctx.fillText(m.id === 'fare' ? m.name : (state.missionIndex + 1) + '/8  ' + m.name + stageText, 26, 138);
     ctx.fillStyle = '#f5f2e8';
     ctx.font = '12px sans-serif';
-    ctx.fillText(m.briefing, 26, 130);
-    if (m.timer != null) {
-      ctx.fillStyle = m.timer < 15 ? '#ff6a5e' : '#f5f2e8';
+    briefLines.forEach((line, i) => ctx.fillText(line, 26, 158 + i * 18));
+    let y = 158 + briefLines.length * 18;
+    if (clock != null) {
+      ctx.fillStyle = clock < 15 ? '#ff6a5e' : '#f5f2e8';
       ctx.font = 'bold 16px sans-serif';
-      ctx.fillText('⏱ ' + Math.ceil(m.timer) + 's', 26, 154);
+      ctx.fillText('⏱ ' + Math.ceil(clock) + 's', 26, y + 4);
+      y += 22;
     }
+    ctx.fillStyle = '#c9c2b2';
+    ctx.font = '12px sans-serif';
+    const radio = RADIO_STATIONS[state.radio] || RADIO_STATIONS[0];
+    ctx.fillText(WEAPONS[state.weapon].name + '  •  ' + radio.name + ' ' + radio.style, 26, y + 4);
   } else {
     ctx.fillStyle = PALETTE.hudBg;
-    roundRect(ctx, 14, 88, 330, 40, 10);
+    roundRect(ctx, 14, 116, 330, 40, 10);
     ctx.fill();
     ctx.fillStyle = '#f5f2e8';
     ctx.font = '13px sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('Free roam — hail a taxi fare (E near a cab) or', 26, 106);
-    ctx.fillText('take a car and enjoy Vice Bay.', 26, 124);
+    ctx.fillText('Free roam — hail a taxi fare (E near a cab) or', 26, 134);
+    ctx.fillText('take a car and enjoy Vice Bay.', 26, 152);
   }
   // Toast message.
   if (state.message && state.messageTimer > 0) {
@@ -384,7 +439,20 @@ function drawHud(ctx, state, city) {
   ctx.font = '12px sans-serif';
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(245,242,232,0.85)';
-  ctx.fillText('WASD move/drive   E enter car   J punch   K shoot   P pause   M mute', 14, VIEW_H - 14);
+  ctx.fillText('WASD move/drive   E enter car   J punch   K shoot   Q weapon   R radio   G garage   P pause   M mute', 14, VIEW_H - 14);
+  if (state.tireTimer > 0) {
+    ctx.fillStyle = '#ff6a5e';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('TIRES SHREDDED — ' + Math.ceil(state.tireTimer) + 's', VIEW_W / 2, 92);
+  }
+  if (state.mode === 'play' && !state.player.onFoot && state.player.car &&
+      Math.hypot(state.player.x - city.garage.x, state.player.y - city.garage.y) < 110) {
+    ctx.fillStyle = '#ffd94a';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Press G — Rico\'s Garage: tune this car (1 engine, 2 armor, 3 paint)', VIEW_W / 2, VIEW_H - 110);
+  }
   if (state.muted) {
     ctx.fillStyle = '#ffb3b3';
     ctx.fillText('MUTED', VIEW_W - 70, VIEW_H - 14);
@@ -457,7 +525,80 @@ export function drawGame(ctx, state, city) {
     ctx.fill();
   }
   ctx.globalAlpha = 1;
-  drawMarker(ctx, state.mission ? state.mission.target : null, cam, state.time);
+  // Roadblocks and spike strips (police escalation).
+  for (const rb of state.roadblocks || []) {
+    ctx.save();
+    ctx.translate(rb.x, rb.y);
+    ctx.rotate(rb.vertical ? 0 : Math.PI / 2);
+    for (let i = -1; i <= 1; i++) {
+      ctx.fillStyle = i % 2 === 0 ? '#ff3b30' : '#f5f2e8';
+      ctx.fillRect(i * 16 - 8, -14, 16, 28);
+    }
+    ctx.fillStyle = '#22252c';
+    ctx.fillRect(-30, -4, 60, 8);
+    ctx.restore();
+  }
+  for (const sp of state.spikes || []) {
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(sp.vertical ? 0 : Math.PI / 2);
+    ctx.fillStyle = '#16181c';
+    ctx.fillRect(-34, -6, 68, 12);
+    ctx.fillStyle = '#c9ced6';
+    for (let i = -3; i <= 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * 10 - 4, -6);
+      ctx.lineTo(i * 10, -14);
+      ctx.lineTo(i * 10 + 4, -6);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  // Air One: the police helicopter and its spotlight.
+  if (state.heli) {
+    const h = state.heli;
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = '#fff8c9';
+    ctx.beginPath();
+    ctx.moveTo(h.x - 26, h.y);
+    ctx.lineTo(h.x + 26, h.y);
+    ctx.lineTo(state.player.x + 40, state.player.y + 40);
+    ctx.lineTo(state.player.x - 40, state.player.y + 40);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.translate(h.x, h.y);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath();
+    ctx.ellipse(0, 6, 26, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#e8e8e8';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 24, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#22252c';
+    ctx.fillRect(14, -3, 18, 6);
+    ctx.strokeStyle = 'rgba(232,232,232,0.8)';
+    ctx.lineWidth = 3;
+    const spin = state.time * 9;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(spin) * -30, Math.sin(spin) * -8);
+    ctx.lineTo(Math.cos(spin) * 30, Math.sin(spin) * 8);
+    ctx.stroke();
+    ctx.fillStyle = '#ff3b30';
+    ctx.beginPath();
+    ctx.arc(0, 0, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#f5f2e8';
+    ctx.fillText('AIR ONE', h.x, h.y - 22);
+  }
+  drawMarker(ctx, missionTarget(state), cam, state.time);
   ctx.restore();
 
   if (state.mode === 'play' || state.mode === 'pause') {
@@ -467,17 +608,37 @@ export function drawGame(ctx, state, city) {
     ctx.fillStyle = 'rgba(6,8,16,0.55)';
     ctx.fillRect(0, 0, VIEW_W, VIEW_H);
     panel(ctx, 'VICE BAY', [
-      'A sun-soaked open-world crime game. Steal cars, dodge the law,',
-      'run three jobs for the crew — and get rich doing it.',
+      'A sun-soaked open-world crime game in an invented bay of smugglers,',
+      'neon motels and crews fighting over every corner. Steal cars,',
+      'dodge the BBPD, and run 8 story jobs for Mara\'s crew — cab fares,',
+      'hot parcels, street races, turf wars and a midnight getaway.',
       '',
       'WASD / arrows — move & drive      E — steal / leave car',
-      'J — punch      K — shoot      P — pause      M — mute',
+      'J — punch      K — shoot      Q — swap weapon      R — radio',
+      'G — garage (tune your car)      P — pause      M — mute',
+      '',
+      'Roadblocks, Air One and spike strips at high heat. Respect ranks,',
+      'district standing, a garage shop, weapon slots and 3 radio stations.',
       '',
       'BEST $' + Math.floor(state.best.money).toLocaleString('en-US') +
         '    •    JOBS DONE ' + state.best.missions,
       '',
       'Press ENTER or click to start',
     ], PALETTE.gold);
+  }
+  if (state.mode === 'garage') {
+    const mods = state.mods;
+    const price = (kind) => mods[kind] >= 3 ? 'MAX' : '$' + GARAGE_UPGRADES[kind].prices[mods[kind]];
+    panel(ctx, 'RICO\'S GARAGE', [
+      'Cash: $' + Math.floor(state.player.money).toLocaleString('en-US') +
+        '    •    Respect: ' + state.respect + ' (' + (state.respectRank ? state.respectRank() : '') + ')',
+      '',
+      '1 — Engine tier ' + mods.engine + '/3 — ' + price('engine') + ' — +12% top speed per tier',
+      '2 — Armor tier ' + mods.armor + '/3 — ' + price('armor') + ' — cop rams hurt less per tier',
+      '3 — Paint tier ' + mods.paint + '/3 — ' + price('paint') + ' — fresh coat, new colour',
+      '',
+      'Press 1 / 2 / 3 to buy, G or Esc to drive out',
+    ], '#e87a2a');
   }
   if (state.mode === 'pause') {
     ctx.fillStyle = 'rgba(6,8,16,0.6)';
@@ -491,7 +652,7 @@ export function drawGame(ctx, state, city) {
       'The Vice Bay crew will remember this one.',
       '',
       'Cash banked: $' + Math.floor(state.player.money).toLocaleString('en-US') +
-        '    •    Jobs finished: ' + state.stats.missionsDone + ' / 3',
+        '    •    Jobs finished: ' + state.stats.missionsDone + ' / 8',
       'Best cash: $' + Math.floor(state.best.money).toLocaleString('en-US'),
       '',
       'Press ENTER to run it back',

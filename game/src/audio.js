@@ -12,6 +12,65 @@ export class SoundBank {
     this.sirenOsc = null;
     this.sirenGain = null;
     this.sirenTimer = null;
+    // Radio: a step sequencer that loops one 8-step bar per station.
+    this.radioTimer = null;
+    this.radioStep = 0;
+    this.radioStation = 0;
+  }
+
+  // Three stations, three moods. Each bar is 8 steps: a bass line, a lead
+  // line and a hat tick. Frequencies are plain note values, 0 means rest.
+  static RADIO_PATTERNS = [
+    // BAY FM 88 — sunset pop: bright, bouncy, C major.
+    { stepMs: 240, wave: 'triangle', bass: [131, 0, 131, 0, 175, 0, 196, 0], lead: [523, 659, 784, 659, 880, 784, 659, 523] },
+    // NEON 101 — synthwave: minor, driving, A minor.
+    { stepMs: 210, wave: 'sawtooth', bass: [110, 110, 0, 110, 131, 0, 98, 0], lead: [440, 0, 523, 0, 659, 523, 440, 330] },
+    // GULL 94 — bass & bounce: low and syncopated, F.
+    { stepMs: 260, wave: 'square', bass: [87, 0, 0, 87, 0, 110, 0, 87], lead: [349, 0, 440, 0, 0, 523, 440, 349] },
+  ];
+
+  // Start the radio loop for a station. Safe to call repeatedly: it only
+  // starts once, and setRadioStation swaps the pattern live.
+  startRadio(station) {
+    if (!this.ctx || this.radioTimer) return;
+    this.radioStation = station || 0;
+    this.radioStep = 0;
+    this.radioTimer = setInterval(() => {
+      if (!this.ctx || this.muted) return;
+      const pat = SoundBank.RADIO_PATTERNS[this.radioStation] || SoundBank.RADIO_PATTERNS[0];
+      const step = this.radioStep % 8;
+      const bass = pat.bass[step];
+      if (bass) this._tone(bass, pat.stepMs / 1000 * 0.9, pat.wave, 0.10);
+      const lead = pat.lead[step];
+      if (lead && step % 2 === 0) this._tone(lead, pat.stepMs / 1000 * 0.8, 'sine', 0.05);
+      if (step % 2 === 1) this._noise(0.03, 0.05, 6000);
+      this.radioStep += 1;
+    }, 240);
+    // Keep the tick in step with the station's tempo.
+    this._retimeRadio();
+  }
+
+  _retimeRadio() {
+    if (!this.radioTimer) return;
+    const pat = SoundBank.RADIO_PATTERNS[this.radioStation] || SoundBank.RADIO_PATTERNS[0];
+    clearInterval(this.radioTimer);
+    this.radioTimer = setInterval(() => {
+      if (!this.ctx || this.muted) return;
+      const p = SoundBank.RADIO_PATTERNS[this.radioStation] || SoundBank.RADIO_PATTERNS[0];
+      const step = this.radioStep % 8;
+      const bass = p.bass[step];
+      if (bass) this._tone(bass, p.stepMs / 1000 * 0.9, p.wave, 0.10);
+      const lead = p.lead[step];
+      if (lead && step % 2 === 0) this._tone(lead, p.stepMs / 1000 * 0.8, 'sine', 0.05);
+      if (step % 2 === 1) this._noise(0.03, 0.05, 6000);
+      this.radioStep += 1;
+    }, pat.stepMs);
+  }
+
+  setRadioStation(station) {
+    this.radioStation = station;
+    this.radioStep = 0;
+    this._retimeRadio();
   }
 
   // Browsers only let audio start after a gesture; call this from any input.
