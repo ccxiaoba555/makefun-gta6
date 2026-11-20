@@ -1,113 +1,90 @@
-// Vice Bay — tuning numbers and colours in one place.
-// Top-down open world, 3200x2400, drawn through a 1280x720 logical viewport
-// with a camera that follows the player. Fixed 1/60 s simulation step.
+// Vice Bay — tuning and world constants.
+// One place holds every number the rest of the game balances against, so a
+// tweak here (a faster car, a longer parcel timer) never means hunting
+// through the update code.
 
-export const WORLD = { width: 3200, height: 2400 };
-export const VIEW = { width: 1280, height: 720 };
-export const STEP = 1 / 60;
+export const WORLD_W = 3200;
+export const WORLD_H = 2400;
 
-// Road grid: vertical roads at these x, horizontal at these y; road width 110.
-export const ROADS_X = [200, 600, 1000, 1400, 1800, 2200, 2600, 3000];
-export const ROADS_Y = [200, 600, 1000, 1400, 1800, 2200];
-export const ROAD_W = 110;
+export const VIEW_W = 1280;
+export const VIEW_H = 800;
 
-export const PLAYER = {
-  radius: 13,
-  walkSpeed: 230,
-  hp: 100,
-  punchDamage: 34,
-  punchRange: 46,
-  punchCooldown: 0.38,
-  shootCooldown: 0.22,
-  bulletSpeed: 760,
-  bulletRange: 620,
-  startAmmo: 12,
-};
+export const ROAD_GAP = 400; // distance between neighbouring road centrelines
+export const ROAD_W = 96; // asphalt width of one road
+export const FIRST_ROAD = 200; // centreline of the first road, x and y alike
 
-export const CAR = {
-  width: 34,
-  length: 62,
-  maxSpeed: 540,
-  accel: 420,
-  brake: 620,
-  reverseMax: 180,
-  turnRate: 2.6, // rad/s at full steer, scaled down at very low speed
-  drag: 0.55,
-};
+export const OCEAN_EDGE = 90; // x < this is open water
+export const SAND_EDGE = 170; // x < this is beach sand
 
-export const TRAFFIC = { count: 14, speedMin: 120, speedMax: 185 };
-export const PEDS = { count: 22, speedMin: 32, speedMax: 62 };
-export const POLICE = { maxSpeed: 500, ramDamage: 6 };
+export const PLAYER_WALK_SPEED = 195;
+export const PLAYER_HP = 100;
+export const PLAYER_RADIUS = 13;
 
-export const WANTED = {
-  maxStars: 3,
-  decayDelay: 9, // seconds with no police in range before a star drops
-  decayInterval: 7,
-};
+export const CAR_ACCEL = 430;
+export const CAR_MAX_SPEED = 540;
+export const CAR_REVERSE_SPEED = 190;
+export const CAR_TURN = 2.5; // radians per second at full lock, scaled by speed
+export const CAR_BRAKE = 620;
+export const CAR_DRAG = 0.55;
 
+export const MAX_WANTED = 5;
+export const WANTED_DECAY_SECONDS = 26; // quiet seconds before one star drops
+export const COPS_PER_STAR = 1; // extra patrol car per wanted star, capped below
+
+export const BULLET_SPEED = 760;
+export const BULLET_RANGE = 520;
+export const SHOOT_COOLDOWN = 0.28;
+export const PUNCH_COOLDOWN = 0.32;
+export const PUNCH_REACH = 46;
+
+export const PARCEL_TIME_LIMIT = 75;
+
+// The three story jobs, in order. After the third the city hands out
+// repeat taxi fares so the game keeps paying.
 export const MISSIONS = [
   {
-    name: 'Taxi Fare',
-    intro: 'Pick up the fare at the yellow marker, then drive them to the hotel.',
-    reward: 80,
-    timeLimit: 0, // no limit for the intro job
+    id: 'taxi',
+    name: 'Cabbie for a Day',
+    reward: 150,
+    briefing: 'Pick up the fare waving at Coral Ave, then drop them at the Marina.',
   },
   {
+    id: 'parcel',
     name: 'Hot Parcel',
-    intro: 'Grab the parcel and deliver it before the timer runs out!',
-    reward: 120,
-    timeLimit: 50,
+    reward: 220,
+    briefing: 'A sealed parcel is waiting at the depot. Deliver it across town before the timer runs out.',
   },
   {
-    name: 'Heat Escape',
-    intro: '3 stars! Lose the cops and reach the safehouse. Do not get busted.',
-    reward: 200,
-    timeLimit: 0,
+    id: 'escape',
+    name: 'Three Stars to Home',
+    reward: 500,
+    briefing: 'The whole precinct is on you. Lose the heat by reaching the safehouse on Gull Lane.',
   },
 ];
 
-// Fixed mission landmarks (road intersections, so a car can always reach them).
-export const SPOTS = {
-  playerStart: { x: 600, y: 1000 },
-  taxiPickup: { x: 1000, y: 600 },
-  taxiDrop: { x: 2200, y: 1400 },
-  parcelPickup: { x: 1800, y: 600 },
-  parcelDrop: { x: 600, y: 1800 },
-  safehouse: { x: 3000, y: 2200 },
-};
-
 export const PALETTE = {
-  backdrop: '#0b0e14',
-  grass: '#2e6b34',
-  grassAlt: '#2a6130',
-  sidewalk: '#8d8f96',
-  road: '#23262e',
-  roadLine: '#e8c93a',
-  water: '#1d6f9e',
-  sand: '#d9c48a',
-  building: ['#7a4a3a', '#4a6a8a', '#8a6a3a', '#5a4a7a', '#3a7a6a', '#8a3a4a'],
-  buildingRoof: '#00000033',
-  player: '#ffd23f',
-  playerCar: '#ffcf3d',
-  taxi: '#ffd23f',
-  traffic: ['#e5534b', '#4fc3f7', '#f2f2f2', '#9b59b6', '#2ecc71', '#e67e22'],
-  police: '#2f6fd0',
-  ped: ['#f2c94c', '#e88ca0', '#7ad0a0', '#c0c8d8', '#f0924f'],
-  bullet: '#ffe066',
-  pickupAmmo: '#4fc3f7',
-  pickupHealth: '#ff5a5a',
-  pickupCash: '#7CFC00',
-  marker: '#ffe14d',
-  text: '#eef1f5',
-  muted: '#aab2c0',
-  panel: '#141821ee',
-  hudBg: '#00000088',
-  star: '#ffd23f',
-  danger: '#ff5a5a',
-  good: '#7CFC00',
+  grass: '#7fae5a',
+  grassDark: '#74a24f',
+  sand: '#e8d39a',
+  ocean: '#2f7fb8',
+  oceanDeep: '#256b9e',
+  road: '#3c3f46',
+  roadEdge: '#2c2e33',
+  sidewalk: '#b9b3a4',
+  laneDash: '#e8d44f',
+  buildingRoof: ['#c96f4a', '#4a7fb8', '#8a6fb8', '#b84a6e', '#4ab89a', '#d8a24a'],
+  buildingWall: '#5d5348',
+  park: '#5da24a',
+  tree: '#2f7a33',
+  treeLight: '#4da34a',
+  plaza: '#c9c2b2',
+  hudBg: 'rgba(10, 14, 24, 0.72)',
+  hudText: '#f5f2e8',
+  gold: '#ffd94a',
+  red: '#ff4a4a',
+  blue: '#4a9dff',
 };
 
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+export const CAR_COLORS = ['#d84a4a', '#4a7fd8', '#e8c33a', '#7ad84a', '#c9c9c9', '#8a5ad8', '#e87a2a', '#3ad8c9'];
 
-/** localStorage keys: best money, missions completed, muted flag. */
-export const SAVE_KEY = 'vice-bay.save.v1';
+export const SAVE_KEY = 'vicebay-best-v1';
