@@ -567,7 +567,34 @@ export class Game {
       this.cops = this.cops.filter((c) => dist(c, this.player) < 900);
     }
     for (const cop of this.cops) {
-      const d = dist(cop, this.player);
+      let d = dist(cop, this.player);
+      // A cop that stops closing in is grinding against a building: after
+      // a couple of seconds with no progress, drop it back onto a road
+      // near the player so the chase stays live instead of stalling out.
+      if (this.wanted > 0) {
+        if (cop.lastDist == null) cop.lastDist = d;
+        if (d > cop.lastDist - 2) cop.stuck = (cop.stuck || 0) + dt;
+        else cop.stuck = 0;
+        cop.lastDist = d;
+        if ((cop.stuck || 0) > 2.5) {
+          // Aim for a road point ~550 px out; keep the closest attempt
+          // instead of a blind last try so a cop never lands across town.
+          let spot = randomRoadPoint(this.rng, this.city);
+          let bestScore = Math.abs(dist(spot, this.player) - 550);
+          for (let tries = 0; tries < 40; tries++) {
+            const cand = randomRoadPoint(this.rng, this.city);
+            const score = Math.abs(dist(cand, this.player) - 550);
+            if (score < bestScore) { spot = cand; bestScore = score; }
+            if (bestScore < 120) break;
+          }
+          cop.x = spot.x;
+          cop.y = spot.y;
+          cop.speed = 0;
+          cop.stuck = 0;
+          cop.lastDist = dist(cop, this.player);
+          d = dist(cop, this.player);
+        }
+      }
       const targetAngle = angleTo(cop, this.player);
       const top = 360 + this.wanted * 26;
       cop.speed = Math.min(top, cop.speed + 320 * dt);
